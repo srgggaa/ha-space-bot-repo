@@ -1111,7 +1111,16 @@ async def process_all_targets(guild: discord.Guild):
             guild.name,
         )
 
-    headers = {"User-Agent": "Mozilla/5.0 SpaceBot/2.0 (+discord bot)"}
+    # Wikimedia (used for the ISRO/Roscosmos "commons" targets) strictly
+    # enforces its User-Agent policy and 403s any request that looks like a
+    # spoofed browser UA (e.g. one starting with "Mozilla/5.0") or is
+    # missing/generic - it wants "<name>/<version> (<contact/context>)"
+    # instead (see foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy).
+    # Used for every request here, not just the Commons ones, since NASA and
+    # Flickr don't mind a descriptive UA either. If you're running many
+    # guilds/instances, consider swapping the URL below for your own contact
+    # info per Wikimedia's policy.
+    headers = {"User-Agent": "SpaceImageDiscordBot/1.1 (https://www.home-assistant.io/; space-bot add-on)"}
     timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
         for target_key, target_info in TARGETS.items():
