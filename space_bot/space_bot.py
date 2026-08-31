@@ -235,12 +235,30 @@ _body_cascade = None
 
 if CV2_AVAILABLE:
     try:
+        # Alpine's py3-opencv package (used in the Docker build) doesn't
+        # ship the cv2.data submodule that pip's opencv-python bundles, so
+        # cv2.data.haarcascades doesn't exist there. Prefer a cascade dir
+        # baked into the image (see Dockerfile), falling back to cv2.data
+        # for environments (e.g. pip install) where it *is* available.
+        _cascade_dir = os.getenv("CASCADE_DIR")
+        if not _cascade_dir:
+            _cascade_dir = getattr(getattr(cv2, "data", None), "haarcascades", None)
+        if not _cascade_dir:
+            raise RuntimeError(
+                "No cascade directory available (set CASCADE_DIR or install "
+                "opencv-python, not just opencv's C++ bindings)"
+            )
+        if not _cascade_dir.endswith("/"):
+            _cascade_dir += "/"
+
         _face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            _cascade_dir + "haarcascade_frontalface_default.xml"
         )
         _body_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_upperbody.xml"
+            _cascade_dir + "haarcascade_upperbody.xml"
         )
+        if _face_cascade.empty() or _body_cascade.empty():
+            raise RuntimeError(f"Cascade XML files failed to load from {_cascade_dir}")
     except Exception as e:
         log.warning("Could not load OpenCV cascades, disabling visual human check: %s", e)
         CV2_AVAILABLE = False
