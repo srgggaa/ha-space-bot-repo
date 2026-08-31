@@ -163,6 +163,15 @@ if os.path.exists(HUMAN_LOG_FILE):
 else:
     human_detections = []
 
+# Migration: earlier versions of this bot only added an id to
+# `downloaded_ids` once an image was actually *posted*, never when it was
+# skipped (metadata match or visual human detection). That meant every
+# skipped image got re-downloaded and re-run through OpenCV on every single
+# fetch cycle / restart, forever. Backfill from the existing human-detection
+# log so upgrading doesn't leave those already-caught images in the "will
+# be rescanned forever" state.
+downloaded_ids.update(entry["id"] for entry in human_detections if "id" in entry)
+
 _log_lock = asyncio.Lock()
 _human_log_lock = asyncio.Lock()
 
@@ -202,6 +211,13 @@ async def log_human_detection(source: str, item_id: str, title: str, image_url: 
         "detected_at": datetime.utcnow().isoformat() + "Z",
     })
     await _atomic_json_write(HUMAN_LOG_FILE, human_detections, _human_log_lock)
+
+    # Mark as processed so this exact image is never re-downloaded and
+    # re-run through OpenCV on a future fetch cycle or restart. Without
+    # this, human-detected images were skipped from posting but never
+    # remembered, so they got rescanned every single run forever.
+    downloaded_ids.add(item_id)
+    await save_log()
 
 
 def clean_url(url_str: str) -> str:
@@ -512,6 +528,8 @@ async def fetch_nasa_api(session: aiohttp.ClientSession, guild: discord.Guild, t
 
         skip_reason = metadata_looks_human_or_fake(item_data)
         if skip_reason:
+            downloaded_ids.add(nasa_id)
+            await save_log()
             return
 
         disp_title = item_data.get("title", "N/A")
