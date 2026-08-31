@@ -1,13 +1,18 @@
 """
 Space Image Discord Bot
 ========================
-Pulls real space photography (NASA image library + Mars rover feeds) into
-per-topic Discord channels, filtering out:
+Pulls real space photography (NASA image library, ESA/SpaceX Flickr feeds,
+and Mars rover feeds) into per-topic Discord channels, filtering out:
   1. Anything that metadata suggests shows people, events, portraits, etc.
   2. Illustrations / artist concepts / renders / diagrams (not real photos).
   3. Anything that actually contains a detected human face or body, checked
      by decoding the image and running it through OpenCV cascade detectors
      (a real visual check, not just a keyword guess).
+
+JAXA and Roscosmos are not included: neither publishes a public photo API
+or an official open-license photo feed (JAXA's archive is a manual,
+per-request licensing portal), so there's no reliable non-scraping source
+to pull from. See the comment block above the ESA/SpaceX TARGETS entries.
 
 Setup
 -----
@@ -17,6 +22,9 @@ Setup
      NASA_API_KEY        - your api.nasa.gov key (optional, defaults to
                             the shared DEMO_KEY, which is heavily rate
                             limited - get a free key at api.nasa.gov)
+     FLICKR_API_KEY      - your Flickr API key (optional; required only
+                            for the ESA and SpaceX channels - get a free
+                            key at flickr.com/services/apps/create/apply)
 3. python space_bot.py
 """
 
@@ -52,8 +60,11 @@ except ImportError:
 
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 NASA_API_KEY = os.getenv("NASA_API_KEY", "DEMO_KEY")
+FLICKR_API_KEY = os.getenv("FLICKR_API_KEY", "")
 
-CATEGORY_NAME = "NASA"
+DEFAULT_CATEGORY_NAME = "NASA"  # kept as the default/fallback so existing
+                                 # NASA channels from before this update stay
+                                 # in the same category and aren't orphaned
 LOG_FILE = "bot_downloaded_log.json"
 HUMAN_LOG_FILE = "bot_human_detected_log.json"
 FETCH_INTERVAL_MINUTES = 60
@@ -135,6 +146,87 @@ TARGETS = {
         "name": "🔴-mars-perseverance",
         "description": "Real surface photography from NASA's Perseverance rover (Jezero Crater, Mars).",
     },
+
+    # ----------------------------------------------------------------
+    # ESA (European Space Agency) - real photography pulled from ESA's
+    # official Flickr photostream (flickr.com/photos/europeanspaceagency).
+    # ESA has no public REST image-search API of its own (esa.int/spaceinimages
+    # is a browse-only gallery with no documented API), so Flickr - which ESA
+    # itself uses as its public image distribution channel - is the working
+    # equivalent of NASA's images-api.nasa.gov here. Requires FLICKR_API_KEY.
+    # ----------------------------------------------------------------
+    "esa-earth": {
+        "type": "flickr", "category": "ESA", "flickr_user": "europeanspaceagency",
+        "text_filter": "Earth observation Copernicus Sentinel",
+        "name": "🌍-esa-earth-observation",
+        "description": "Real Earth-observation imagery from ESA's Copernicus/Sentinel programme, ESA Flickr.",
+    },
+    "esa-solar-system": {
+        "type": "flickr", "category": "ESA", "flickr_user": "europeanspaceagency",
+        "text_filter": "Mars Express Rosetta BepiColombo JUICE Solar Orbiter",
+        "name": "🪐-esa-solar-system",
+        "description": "Real imagery from ESA's solar-system missions (Mars Express, Rosetta, BepiColombo, JUICE, Solar Orbiter).",
+    },
+    "esa-launchers": {
+        "type": "flickr", "category": "ESA", "flickr_user": "europeanspaceagency",
+        "text_filter": "Ariane Vega launch",
+        "name": "🚀-esa-launchers",
+        "description": "Real launch photography of ESA's Ariane and Vega rockets, ESA Flickr.",
+    },
+    "esa-iss": {
+        "type": "flickr", "category": "ESA", "flickr_user": "europeanspaceagency",
+        "text_filter": "International Space Station Columbus",
+        "name": "🛰️-esa-iss",
+        "description": "Real photography of ESA's work on and around the International Space Station.",
+    },
+
+    # ----------------------------------------------------------------
+    # SpaceX - real mission photography pulled from SpaceX's official
+    # Flickr account (flickr.com/photos/spacex), which SpaceX uses to
+    # release its own photos into the public domain (CC0). SpaceX has no
+    # public REST image-search API, so this is the working equivalent.
+    # Requires FLICKR_API_KEY.
+    # ----------------------------------------------------------------
+    "spacex-falcon": {
+        "type": "flickr", "category": "SpaceX", "flickr_user": "spacex",
+        "text_filter": "Falcon 9 Falcon Heavy",
+        "name": "🚀-spacex-falcon",
+        "description": "Real launch and landing photography of Falcon 9 and Falcon Heavy, official SpaceX Flickr.",
+    },
+    "spacex-starship": {
+        "type": "flickr", "category": "SpaceX", "flickr_user": "spacex",
+        "text_filter": "Starship Super Heavy",
+        "name": "🚀-spacex-starship",
+        "description": "Real test and flight photography of Starship and Super Heavy, official SpaceX Flickr.",
+    },
+    "spacex-dragon": {
+        "type": "flickr", "category": "SpaceX", "flickr_user": "spacex",
+        "text_filter": "Dragon spacecraft",
+        "name": "🐉-spacex-dragon",
+        "description": "Real photography of Crew Dragon and Cargo Dragon, official SpaceX Flickr.",
+    },
+    "spacex-other": {
+        "type": "flickr", "category": "SpaceX", "flickr_user": "spacex",
+        "text_filter": "",
+        "name": "🛰️-spacex-other",
+        "description": "Other real SpaceX mission photography (facilities, hardware, misc launches), official SpaceX Flickr.",
+    },
+
+    # ----------------------------------------------------------------
+    # JAXA (Japan) and Roscosmos (Russia) were requested but are left
+    # unimplemented on purpose rather than bolted on with something
+    # fragile:
+    #   - JAXA has no public photo API and no official Flickr gallery;
+    #     its "JAXA Digital Archives" (jda.jaxa.jp) is a manual,
+    #     per-request licensing portal with no programmatic access.
+    #   - Roscosmos has no public photo API or official open-license
+    #     photo feed at all.
+    # The only real options for either would be scraping their
+    # non-API web pages, which breaks silently and isn't something
+    # this bot builds on. If either agency publishes a real API or an
+    # official Flickr/open-image feed in the future, add a "flickr" or
+    # "nasa_api"-style entry here the same way ESA/SpaceX were added.
+    # ----------------------------------------------------------------
 }
 
 # Metadata-level exclusions. Two separate lists so we can log *why* an item
@@ -478,24 +570,30 @@ def _locked_overwrites(guild: discord.Guild, bot_role: discord.Role):
     }
 
 
-async def get_or_create_channel(guild: discord.Guild, channel_name: str, bot_role: discord.Role, topic: str | None = None):
+async def get_or_create_channel(
+    guild: discord.Guild,
+    channel_name: str,
+    bot_role: discord.Role,
+    topic: str | None = None,
+    category_name: str = DEFAULT_CATEGORY_NAME,
+):
     overwrites = _locked_overwrites(guild, bot_role) if bot_role else None
 
-    category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
+    category = discord.utils.get(guild.categories, name=category_name)
     if not category:
         try:
-            category = await guild.create_category(name=CATEGORY_NAME, overwrites=overwrites)
+            category = await guild.create_category(name=category_name, overwrites=overwrites)
         except discord.Forbidden:
-            log.error("Missing permission to create category '%s' in %s", CATEGORY_NAME, guild.name)
+            log.error("Missing permission to create category '%s' in %s", category_name, guild.name)
             return None
         except Exception as e:
-            log.error("Failed to create category %s: %s", CATEGORY_NAME, e)
+            log.error("Failed to create category %s: %s", category_name, e)
             return None
     elif overwrites and category.overwrites != overwrites:
         try:
             await category.edit(overwrites=overwrites, reason="Lock category to bot-only posting")
         except discord.Forbidden:
-            log.warning("Missing permission to update permissions on category '%s'", CATEGORY_NAME)
+            log.warning("Missing permission to update permissions on category '%s'", category_name)
         except Exception as e:
             log.warning("Failed to update category permissions: %s", e)
 
@@ -546,7 +644,7 @@ def parse_date(item_obj: dict) -> datetime:
 
 
 async def fetch_nasa_api(session: aiohttp.ClientSession, guild: discord.Guild, target_info: dict, bot_role: discord.Role):
-    channel = await get_or_create_channel(guild, target_info["name"], bot_role, topic=target_info.get("description"))
+    channel = await get_or_create_channel(guild, target_info["name"], bot_role, topic=target_info.get("description"), category_name=target_info.get("category", DEFAULT_CATEGORY_NAME))
     if not channel:
         return
 
@@ -629,6 +727,151 @@ async def fetch_nasa_api(session: aiohttp.ClientSession, guild: discord.Guild, t
 
 
 # --------------------------------------------------------------------------
+# Flickr (used for ESA and SpaceX - neither has a public REST image API of
+# its own, but both publish their real mission photography through Flickr)
+# --------------------------------------------------------------------------
+
+_flickr_nsid_cache: dict[str, str] = {}
+_flickr_warned_no_key = False
+
+
+async def resolve_flickr_nsid(session: aiohttp.ClientSession, username: str) -> str | None:
+    """Resolves a Flickr @username to its numeric NSID (required by
+    flickr.photos.search), caching the result. Resolving by username at
+    runtime instead of hardcoding an NSID means this keeps working even if
+    an account's NSID changes accounts/ownership."""
+    if username in _flickr_nsid_cache:
+        return _flickr_nsid_cache[username]
+
+    url = (
+        "https://api.flickr.com/services/rest/?method=flickr.people.findByUsername"
+        f"&api_key={FLICKR_API_KEY}&username={urllib.parse.quote(username)}"
+        "&format=json&nojsoncallback=1"
+    )
+    data = await get_json_with_retries(session, url)
+    if not data or data.get("stat") != "ok":
+        log.error(
+            "Could not resolve Flickr username '%s' to an NSID (response: %s)",
+            username, data,
+        )
+        return None
+
+    nsid = data["user"]["nsid"]
+    _flickr_nsid_cache[username] = nsid
+    return nsid
+
+
+async def fetch_flickr(session: aiohttp.ClientSession, guild: discord.Guild, target_info: dict, bot_role: discord.Role):
+    global _flickr_warned_no_key
+    if not FLICKR_API_KEY:
+        if not _flickr_warned_no_key:
+            log.warning(
+                "flickr_api_key is not set - skipping ESA/SpaceX channels. "
+                "Get a free key at https://www.flickr.com/services/apps/create/apply"
+            )
+            _flickr_warned_no_key = True
+        return
+
+    channel = await get_or_create_channel(
+        guild, target_info["name"], bot_role, topic=target_info.get("description"),
+        category_name=target_info.get("category", DEFAULT_CATEGORY_NAME),
+    )
+    if not channel:
+        return
+
+    username = target_info["flickr_user"]
+    nsid = await resolve_flickr_nsid(session, username)
+    if not nsid:
+        return
+
+    text_filter = target_info.get("text_filter", "")
+    all_photos = []
+    for page in range(1, MAX_PAGES + 1):
+        params = {
+            "method": "flickr.photos.search",
+            "api_key": FLICKR_API_KEY,
+            "user_id": nsid,
+            "extras": "description,tags,date_taken,url_o,url_l,url_c",
+            "per_page": str(PAGE_SIZE),
+            "page": str(page),
+            "sort": "date-taken-asc",
+            "format": "json",
+            "nojsoncallback": "1",
+        }
+        if text_filter:
+            params["text"] = text_filter
+        url = "https://api.flickr.com/services/rest/?" + urllib.parse.urlencode(params)
+        data = await get_json_with_retries(session, url)
+        if not data or data.get("stat") != "ok":
+            break
+        photos_block = data.get("photos", {})
+        photos = photos_block.get("photo", [])
+        if not photos:
+            break
+        all_photos.extend(photos)
+        if page >= int(photos_block.get("pages", 1)):
+            break
+
+    sem = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
+
+    async def handle_photo(photo: dict):
+        flickr_id = f"flickr_{photo['id']}"
+        if flickr_id in downloaded_ids:
+            return
+
+        title = photo.get("title") or "Untitled"
+        description = ""
+        desc_field = photo.get("description")
+        if isinstance(desc_field, dict):
+            description = desc_field.get("_content", "")
+        tags = (photo.get("tags") or "").split()
+
+        skip_reason = metadata_looks_human_or_fake(
+            {"title": title, "description": description, "keywords": tags}
+        )
+        if skip_reason:
+            downloaded_ids.add(flickr_id)
+            await save_log()
+            return
+
+        image_url = photo.get("url_o") or photo.get("url_l") or photo.get("url_c")
+        if not image_url:
+            return
+        image_url = clean_url(image_url)
+        page_url = f"https://www.flickr.com/photos/{username}/{photo['id']}"
+
+        log.debug("Checking %s (%s) -> %s", flickr_id, title[:40], image_url)
+        async with sem:
+            if await image_contains_human(session, image_url):
+                log.info("Skipping %s (%s): human detected in image", flickr_id, title[:40])
+                await log_human_detection(
+                    source=f"flickr_{username}",
+                    item_id=flickr_id,
+                    title=title,
+                    image_url=image_url,
+                    channel_name=target_info["name"],
+                )
+                return
+
+        embed = discord.Embed(title=title[:256], url=page_url, color=discord.Color.gold())
+        embed.add_field(name="Date Taken", value=str(photo.get("datetaken", "N/A"))[:10], inline=True)
+        embed.add_field(name="Source", value=f"[View on Flickr]({page_url})", inline=False)
+        embed.set_image(url=image_url)
+        embed.set_footer(text=f"Flickr ID: {photo['id']}")
+
+        try:
+            await channel.send(embed=embed)
+            log.info("Posted: %s... to %s", title[:30], target_info["name"])
+            downloaded_ids.add(flickr_id)
+            await save_log()
+        except discord.HTTPException as e:
+            log.warning("Failed to post image (%s): %s", flickr_id, e)
+
+    for photo in all_photos:
+        await handle_photo(photo)
+
+
+# --------------------------------------------------------------------------
 # Mars rover photos
 # --------------------------------------------------------------------------
 
@@ -666,7 +909,7 @@ async def get_mars_photos(session: aiohttp.ClientSession, rover: str) -> list[di
 
 
 async def fetch_mars_api(session: aiohttp.ClientSession, guild: discord.Guild, target_info: dict, bot_role: discord.Role):
-    channel = await get_or_create_channel(guild, target_info["name"], bot_role, topic=target_info.get("description"))
+    channel = await get_or_create_channel(guild, target_info["name"], bot_role, topic=target_info.get("description"), category_name=target_info.get("category", DEFAULT_CATEGORY_NAME))
     if not channel:
         return
 
@@ -752,6 +995,8 @@ async def process_all_targets(guild: discord.Guild):
                     await fetch_nasa_api(session, guild, target_info, bot_role)
                 elif target_info["type"] == "mars_api":
                     await fetch_mars_api(session, guild, target_info, bot_role)
+                elif target_info["type"] == "flickr":
+                    await fetch_flickr(session, guild, target_info, bot_role)
             except Exception as e:
                 log.exception("Error processing target %s: %s", target_key, e)
 
@@ -799,8 +1044,13 @@ async def on_command_error(ctx: commands.Context, error):
 @commands.has_permissions(manage_channels=True)
 @commands.cooldown(1, 300, commands.BucketType.guild)
 async def setup_space(ctx: commands.Context):
+    sources = "NASA Media and Mars archives"
+    if FLICKR_API_KEY:
+        sources += ", ESA Flickr, and SpaceX Flickr"
+    else:
+        sources += " (ESA/SpaceX skipped - no flickr_api_key configured)"
     await ctx.send(
-        "Starting search across NASA Media and Mars archives "
+        f"Starting search across {sources} "
         f"(filtering out humans and non-photo renders{' + visual face check' if CV2_AVAILABLE else ''})..."
     )
     await process_all_targets(ctx.guild)
