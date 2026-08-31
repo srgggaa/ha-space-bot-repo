@@ -2,17 +2,18 @@
 Space Image Discord Bot
 ========================
 Pulls real space photography (NASA image library, ESA/SpaceX Flickr feeds,
-and Mars rover feeds) into per-topic Discord channels, filtering out:
+ISRO/Roscosmos via Wikimedia Commons, and Mars rover feeds) into per-topic
+Discord channels, filtering out:
   1. Anything that metadata suggests shows people, events, portraits, etc.
   2. Illustrations / artist concepts / renders / diagrams (not real photos).
   3. Anything that actually contains a detected human face or body, checked
      by decoding the image and running it through OpenCV cascade detectors
      (a real visual check, not just a keyword guess).
 
-JAXA and Roscosmos are not included: neither publishes a public photo API
-or an official open-license photo feed (JAXA's archive is a manual,
-per-request licensing portal), so there's no reliable non-scraping source
-to pull from. See the comment block above the ESA/SpaceX TARGETS entries.
+JAXA is not included: it has no public photo API, no official Flickr, and
+barely any openly-licensed photography on Wikimedia Commons either (its
+archive is a manual, per-request licensing portal) - see the comment above
+its TARGETS entry for details.
 
 Setup
 -----
@@ -24,9 +25,9 @@ Setup
                             limited - get a free key at api.nasa.gov)
 3. python space_bot.py
 
-Note: ESA and SpaceX channels use Flickr's free public feed, not
-Flickr's REST API (which now requires a paid Flickr Pro account just to
-issue an API key) - so no Flickr credentials are needed at all.
+Note: ESA/SpaceX (Flickr's public feed) and ISRO/Roscosmos (Wikimedia
+Commons) all use free, keyless public endpoints - no extra credentials
+needed for any of them.
 """
 
 import os
@@ -176,19 +177,32 @@ TARGETS = {
     },
 
     # ----------------------------------------------------------------
-    # JAXA (Japan) and Roscosmos (Russia) were requested but are left
-    # unimplemented on purpose rather than bolted on with something
-    # fragile:
-    #   - JAXA has no public photo API and no official Flickr gallery;
-    #     its "JAXA Digital Archives" (jda.jaxa.jp) is a manual,
-    #     per-request licensing portal with no programmatic access.
-    #   - Roscosmos has no public photo API or official open-license
-    #     photo feed at all.
-    # The only real options for either would be scraping their
-    # non-API web pages, which breaks silently and isn't something
-    # this bot builds on. If either agency publishes a real API or an
-    # official Flickr/open-image feed in the future, add a "flickr" or
-    # "nasa_api"-style entry here the same way ESA/SpaceX were added.
+    # ISRO (India) and Roscosmos (Russia) - neither publishes a public
+    # photo API or its own open-license photo feed, so these pull from
+    # Wikimedia Commons instead: a free, keyless MediaWiki API that hosts
+    # openly-licensed real photography of both agencies' missions,
+    # organized into browsable categories. See fetch_commons_category.
+    # ----------------------------------------------------------------
+    "isro": {
+        "type": "commons", "category": "ISRO", "commons_category": "Images from ISRO",
+        "name": "🛰️-isro",
+        "description": "Real space photography from ISRO (Indian Space Research Organisation), via Wikimedia Commons.",
+    },
+    "roscosmos": {
+        "type": "commons", "category": "Roscosmos", "commons_category": "Baikonur Cosmodrome",
+        "name": "🚀-roscosmos",
+        "description": "Real launch photography of Roscosmos/Russian missions from the Baikonur Cosmodrome, via Wikimedia Commons.",
+    },
+
+    # ----------------------------------------------------------------
+    # JAXA (Japan) was requested but is still left unimplemented on
+    # purpose: it has no public photo API, no official Flickr gallery,
+    # and (unlike ISRO/Roscosmos) barely any real mission photography on
+    # Wikimedia Commons either - its "JAXA Digital Archives"
+    # (jda.jaxa.jp) is a manual, per-request licensing portal that keeps
+    # its imagery out of the openly-licensed pool the other sources here
+    # draw from. If that ever changes, add a "flickr" or "commons"-style
+    # entry here the same way the others were added.
     # ----------------------------------------------------------------
 }
 
@@ -855,6 +869,134 @@ async def fetch_flickr(session: aiohttp.ClientSession, guild: discord.Guild, tar
 
 
 # --------------------------------------------------------------------------
+# Wikimedia Commons (used for ISRO and Roscosmos - neither publishes a
+# public photo API or an official open-license photo feed of its own, but
+# Commons hosts openly-licensed real photography of their missions,
+# organized into browsable categories, via a free, keyless MediaWiki API)
+# --------------------------------------------------------------------------
+
+async def fetch_commons_category(session: aiohttp.ClientSession, guild: discord.Guild, target_info: dict, bot_role: discord.Role):
+    channel = await get_or_create_channel(
+        guild, target_info["name"], bot_role, topic=target_info.get("description"),
+        category_name=target_info.get("category", DEFAULT_CATEGORY_NAME),
+    )
+    if not channel:
+        return
+
+    commons_category = target_info["commons_category"]
+    all_pages = []
+    gcmcontinue = None
+    for _ in range(MAX_PAGES):
+        params = {
+            "action": "query",
+            "generator": "categorymembers",
+            "gcmtitle": f"Category:{commons_category}",
+            "gcmtype": "file",
+            "gcmlimit": "500",
+            "prop": "imageinfo",
+            "iiprop": "url|extmetadata|mime",
+            "iiurlwidth": "1600",
+            "format": "json",
+        }
+        if gcmcontinue:
+            params["gcmcontinue"] = gcmcontinue
+        url = "https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode(params)
+        data = await get_json_with_retries(session, url)
+        if not data:
+            break
+        pages = data.get("query", {}).get("pages", {})
+        all_pages.extend(pages.values())
+        gcmcontinue = data.get("continue", {}).get("gcmcontinue")
+        if not gcmcontinue:
+            break
+
+    # Sort oldest-first when a capture date is available, same as the other
+    # sources; files with no known date sort first (empty string < any date).
+    def _sort_key(page):
+        info = (page.get("imageinfo") or [{}])[0]
+        return info.get("extmetadata", {}).get("DateTimeOriginal", {}).get("value", "")
+
+    all_pages.sort(key=_sort_key)
+    sem = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
+
+    async def handle_page(page: dict):
+        page_id = page.get("pageid")
+        title = page.get("title", "")
+        if not page_id or not title:
+            return
+        commons_id = f"commons_{page_id}"
+        if commons_id in downloaded_ids:
+            return
+
+        infos = page.get("imageinfo") or []
+        if not infos:
+            return
+        info = infos[0]
+        mime = info.get("mime", "")
+        # Commons categories mix in videos, SVG diagrams/logos, and PDFs
+        # alongside real photos - only real raster photography should post.
+        if not mime.startswith("image/") or mime == "image/svg+xml":
+            return
+
+        extmeta = info.get("extmetadata", {})
+        description_html = extmeta.get("ImageDescription", {}).get("value", "")
+        description = re.sub(r"<[^>]+>", " ", description_html)
+        categories_str = extmeta.get("Categories", {}).get("value", "")
+        keywords = categories_str.split("|") if categories_str else []
+        disp_title = title[len("File:"):] if title.startswith("File:") else title
+        disp_title = re.sub(r"\.[a-zA-Z0-9]+$", "", disp_title).replace("_", " ")
+
+        skip_reason = metadata_looks_human_or_fake(
+            {"title": disp_title, "description": description, "keywords": keywords}
+        )
+        if skip_reason:
+            downloaded_ids.add(commons_id)
+            await save_log()
+            return
+
+        image_url = info.get("thumburl") or info.get("url")
+        if not image_url:
+            return
+        image_url = clean_url(image_url)
+        page_url = f"https://commons.wikimedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}"
+        artist_html = extmeta.get("Artist", {}).get("value", "")
+        artist = re.sub(r"<[^>]+>", " ", artist_html).strip() or "Wikimedia Commons"
+        license_name = extmeta.get("LicenseShortName", {}).get("value", "")
+
+        log.debug("Checking %s (%s) -> %s", commons_id, disp_title[:40], image_url)
+        async with sem:
+            if await image_contains_human(session, image_url):
+                log.info("Skipping %s (%s): human detected in image", commons_id, disp_title[:40])
+                await log_human_detection(
+                    source=f"commons_{commons_category}",
+                    item_id=commons_id,
+                    title=disp_title,
+                    image_url=image_url,
+                    channel_name=target_info["name"],
+                )
+                return
+
+        embed = discord.Embed(title=disp_title[:256], url=page_url, color=discord.Color.dark_teal())
+        embed.add_field(name="Credit", value=artist[:1024], inline=True)
+        if license_name:
+            embed.add_field(name="License", value=license_name, inline=True)
+        embed.add_field(name="Source", value=f"[View on Wikimedia Commons]({page_url})", inline=False)
+        embed.set_image(url=image_url)
+        embed.set_footer(text=f"Commons Page ID: {page_id}")
+
+        try:
+            await channel.send(embed=embed)
+            log.info("Posted: %s... to %s", disp_title[:30], target_info["name"])
+            downloaded_ids.add(commons_id)
+            await save_log()
+        except discord.HTTPException as e:
+            log.warning("Failed to post image (%s): %s", commons_id, e)
+
+    for page in all_pages:
+        await handle_page(page)
+
+
+# --------------------------------------------------------------------------
 # Mars rover photos
 # --------------------------------------------------------------------------
 
@@ -980,6 +1122,8 @@ async def process_all_targets(guild: discord.Guild):
                     await fetch_mars_api(session, guild, target_info, bot_role)
                 elif target_info["type"] == "flickr":
                     await fetch_flickr(session, guild, target_info, bot_role)
+                elif target_info["type"] == "commons":
+                    await fetch_commons_category(session, guild, target_info, bot_role)
             except Exception as e:
                 log.exception("Error processing target %s: %s", target_key, e)
 
@@ -1028,7 +1172,8 @@ async def on_command_error(ctx: commands.Context, error):
 @commands.cooldown(1, 300, commands.BucketType.guild)
 async def setup_space(ctx: commands.Context):
     await ctx.send(
-        "Starting search across NASA Media/Mars archives, ESA Flickr, and SpaceX Flickr "
+        "Starting search across NASA Media/Mars archives, ESA Flickr, SpaceX Flickr, "
+        "and ISRO/Roscosmos via Wikimedia Commons "
         f"(filtering out humans and non-photo renders{' + visual face check' if CV2_AVAILABLE else ''})..."
     )
     await process_all_targets(ctx.guild)
