@@ -22,15 +22,17 @@ Setup
      NASA_API_KEY        - your api.nasa.gov key (optional, defaults to
                             the shared DEMO_KEY, which is heavily rate
                             limited - get a free key at api.nasa.gov)
-     FLICKR_API_KEY      - your Flickr API key (optional; required only
-                            for the ESA and SpaceX channels - get a free
-                            key at flickr.com/services/apps/create/apply)
 3. python space_bot.py
+
+Note: ESA and SpaceX channels use Flickr's free public feed, not
+Flickr's REST API (which now requires a paid Flickr Pro account just to
+issue an API key) - so no Flickr credentials are needed at all.
 """
 
 import os
 import io
 import json
+import re
 import asyncio
 import logging
 import tempfile
@@ -60,7 +62,6 @@ except ImportError:
 
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 NASA_API_KEY = os.getenv("NASA_API_KEY", "DEMO_KEY")
-FLICKR_API_KEY = os.getenv("FLICKR_API_KEY", "")
 
 DEFAULT_CATEGORY_NAME = "NASA"  # kept as the default/fallback so existing
                                  # NASA channels from before this update stay
@@ -149,67 +150,29 @@ TARGETS = {
 
     # ----------------------------------------------------------------
     # ESA (European Space Agency) - real photography pulled from ESA's
-    # official Flickr photostream (flickr.com/photos/europeanspaceagency).
-    # ESA has no public REST image-search API of its own (esa.int/spaceinimages
-    # is a browse-only gallery with no documented API), so Flickr - which ESA
-    # itself uses as its public image distribution channel - is the working
-    # equivalent of NASA's images-api.nasa.gov here. Requires FLICKR_API_KEY.
+    # official Flickr photostream (flickr.com/photos/europeanspaceagency)
+    # via Flickr's free public feed (see fetch_flickr for why: Flickr's
+    # paid-only REST search API is deliberately not used). The public feed
+    # is a single per-account "latest photos" stream with no full-text
+    # search, so unlike NASA this is one general channel rather than
+    # several mission-specific ones.
     # ----------------------------------------------------------------
-    "esa-earth": {
+    "esa": {
         "type": "flickr", "category": "ESA", "flickr_user": "europeanspaceagency",
-        "text_filter": "Earth observation Copernicus Sentinel",
-        "name": "🌍-esa-earth-observation",
-        "description": "Real Earth-observation imagery from ESA's Copernicus/Sentinel programme, ESA Flickr.",
-    },
-    "esa-solar-system": {
-        "type": "flickr", "category": "ESA", "flickr_user": "europeanspaceagency",
-        "text_filter": "Mars Express Rosetta BepiColombo JUICE Solar Orbiter",
-        "name": "🪐-esa-solar-system",
-        "description": "Real imagery from ESA's solar-system missions (Mars Express, Rosetta, BepiColombo, JUICE, Solar Orbiter).",
-    },
-    "esa-launchers": {
-        "type": "flickr", "category": "ESA", "flickr_user": "europeanspaceagency",
-        "text_filter": "Ariane Vega launch",
-        "name": "🚀-esa-launchers",
-        "description": "Real launch photography of ESA's Ariane and Vega rockets, ESA Flickr.",
-    },
-    "esa-iss": {
-        "type": "flickr", "category": "ESA", "flickr_user": "europeanspaceagency",
-        "text_filter": "International Space Station Columbus",
-        "name": "🛰️-esa-iss",
-        "description": "Real photography of ESA's work on and around the International Space Station.",
+        "name": "🛰️-esa",
+        "description": "Real space photography from ESA's official Flickr photostream.",
     },
 
     # ----------------------------------------------------------------
     # SpaceX - real mission photography pulled from SpaceX's official
     # Flickr account (flickr.com/photos/spacex), which SpaceX uses to
-    # release its own photos into the public domain (CC0). SpaceX has no
-    # public REST image-search API, so this is the working equivalent.
-    # Requires FLICKR_API_KEY.
+    # release its own photos into the public domain, via the same free
+    # public feed mechanism as ESA above.
     # ----------------------------------------------------------------
-    "spacex-falcon": {
+    "spacex": {
         "type": "flickr", "category": "SpaceX", "flickr_user": "spacex",
-        "text_filter": "Falcon 9 Falcon Heavy",
-        "name": "🚀-spacex-falcon",
-        "description": "Real launch and landing photography of Falcon 9 and Falcon Heavy, official SpaceX Flickr.",
-    },
-    "spacex-starship": {
-        "type": "flickr", "category": "SpaceX", "flickr_user": "spacex",
-        "text_filter": "Starship Super Heavy",
-        "name": "🚀-spacex-starship",
-        "description": "Real test and flight photography of Starship and Super Heavy, official SpaceX Flickr.",
-    },
-    "spacex-dragon": {
-        "type": "flickr", "category": "SpaceX", "flickr_user": "spacex",
-        "text_filter": "Dragon spacecraft",
-        "name": "🐉-spacex-dragon",
-        "description": "Real photography of Crew Dragon and Cargo Dragon, official SpaceX Flickr.",
-    },
-    "spacex-other": {
-        "type": "flickr", "category": "SpaceX", "flickr_user": "spacex",
-        "text_filter": "",
-        "name": "🛰️-spacex-other",
-        "description": "Other real SpaceX mission photography (facilities, hardware, misc launches), official SpaceX Flickr.",
+        "name": "🚀-spacex",
+        "description": "Real mission photography from SpaceX's official Flickr photostream.",
     },
 
     # ----------------------------------------------------------------
@@ -496,6 +459,28 @@ async def get_json_with_retries(session: aiohttp.ClientSession, url: str):
     return None
 
 
+async def get_text_with_retries(session: aiohttp.ClientSession, url: str) -> str | None:
+    """Like get_json_with_retries, but for endpoints (like Flickr's public
+    feeds) that don't reliably send a JSON content-type, so resp.json()
+    can't be used directly."""
+    for attempt in range(1, HTTP_MAX_RETRIES + 1):
+        try:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    return await resp.text()
+                if resp.status == 429:
+                    wait = HTTP_BACKOFF_SECONDS * attempt
+                    log.warning("Rate limited on %s, waiting %ss", url, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                log.warning("Request to %s failed with status %s", url, resp.status)
+                return None
+        except aiohttp.ClientError as e:
+            log.warning("Request error on %s (attempt %s): %s", url, attempt, e)
+            await asyncio.sleep(HTTP_BACKOFF_SECONDS * attempt)
+    return None
+
+
 # --------------------------------------------------------------------------
 # Discord role & channel management
 # --------------------------------------------------------------------------
@@ -729,49 +714,48 @@ async def fetch_nasa_api(session: aiohttp.ClientSession, guild: discord.Guild, t
 # --------------------------------------------------------------------------
 # Flickr (used for ESA and SpaceX - neither has a public REST image API of
 # its own, but both publish their real mission photography through Flickr)
+#
+# NOTE: Flickr's REST API (flickr.photos.search etc.) now requires a paid
+# Flickr Pro subscription just to issue a new API key, so this deliberately
+# does NOT use it. Instead it uses Flickr's public feed endpoint
+# (services/feeds/photos_public.gne), which is still free/keyless - it's
+# what Flickr itself designed for exactly this kind of external polling.
+# The tradeoff: the public feed only returns each account's ~20 most
+# recent public photos and has no free-text search, only a per-user feed
+# (and an ALL/ANY tag filter, which isn't reliable here since we can't
+# assume either agency tags photos consistently). So instead of the
+# mission-specific sub-channels NASA gets, ESA and SpaceX each get one
+# channel of their latest real photos. Since the bot polls hourly and
+# dedupes by photo ID, it still catches everything each account posts
+# going forward - it just can't backfill their full multi-thousand-photo
+# archives the way the paid search API could have.
 # --------------------------------------------------------------------------
 
-_flickr_nsid_cache: dict[str, str] = {}
-_flickr_warned_no_key = False
+# Numeric Flickr NSIDs for each account, looked up once by hand (Flickr's
+# username->NSID lookup method also now requires the paid API tier). If an
+# account ever migrates to a new NSID, update it here.
+FLICKR_NSIDS = {
+    "europeanspaceagency": "37472264@N04",
+    "spacex": "130608600@N05",
+}
+
+_FLICKR_FEED_RE = re.compile(r"^\s*jsonFlickrFeed\((.*)\)\s*;?\s*$", re.DOTALL)
 
 
-async def resolve_flickr_nsid(session: aiohttp.ClientSession, username: str) -> str | None:
-    """Resolves a Flickr @username to its numeric NSID (required by
-    flickr.photos.search), caching the result. Resolving by username at
-    runtime instead of hardcoding an NSID means this keeps working even if
-    an account's NSID changes accounts/ownership."""
-    if username in _flickr_nsid_cache:
-        return _flickr_nsid_cache[username]
-
-    url = (
-        "https://api.flickr.com/services/rest/?method=flickr.people.findByUsername"
-        f"&api_key={FLICKR_API_KEY}&username={urllib.parse.quote(username)}"
-        "&format=json&nojsoncallback=1"
-    )
-    data = await get_json_with_retries(session, url)
-    if not data or data.get("stat") != "ok":
-        log.error(
-            "Could not resolve Flickr username '%s' to an NSID (response: %s)",
-            username, data,
-        )
+def _parse_flickr_feed(raw_text: str) -> dict | None:
+    """The public feed's format=json response is JSONP - a jsonFlickrFeed(...)
+    call wrapping the actual JSON object - not plain JSON, so it can't be
+    read with resp.json(). Strip the wrapper and parse what's left."""
+    match = _FLICKR_FEED_RE.match(raw_text)
+    body = match.group(1) if match else raw_text
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as e:
+        log.warning("Could not parse Flickr feed response: %s", e)
         return None
-
-    nsid = data["user"]["nsid"]
-    _flickr_nsid_cache[username] = nsid
-    return nsid
 
 
 async def fetch_flickr(session: aiohttp.ClientSession, guild: discord.Guild, target_info: dict, bot_role: discord.Role):
-    global _flickr_warned_no_key
-    if not FLICKR_API_KEY:
-        if not _flickr_warned_no_key:
-            log.warning(
-                "flickr_api_key is not set - skipping ESA/SpaceX channels. "
-                "Get a free key at https://www.flickr.com/services/apps/create/apply"
-            )
-            _flickr_warned_no_key = True
-        return
-
     channel = await get_or_create_channel(
         guild, target_info["name"], bot_role, topic=target_info.get("description"),
         category_name=target_info.get("category", DEFAULT_CATEGORY_NAME),
@@ -780,51 +764,45 @@ async def fetch_flickr(session: aiohttp.ClientSession, guild: discord.Guild, tar
         return
 
     username = target_info["flickr_user"]
-    nsid = await resolve_flickr_nsid(session, username)
+    nsid = FLICKR_NSIDS.get(username)
     if not nsid:
+        log.error("No known Flickr NSID for username '%s' - add one to FLICKR_NSIDS", username)
         return
 
-    text_filter = target_info.get("text_filter", "")
-    all_photos = []
-    for page in range(1, MAX_PAGES + 1):
-        params = {
-            "method": "flickr.photos.search",
-            "api_key": FLICKR_API_KEY,
-            "user_id": nsid,
-            "extras": "description,tags,date_taken,url_o,url_l,url_c",
-            "per_page": str(PAGE_SIZE),
-            "page": str(page),
-            "sort": "date-taken-asc",
-            "format": "json",
-            "nojsoncallback": "1",
-        }
-        if text_filter:
-            params["text"] = text_filter
-        url = "https://api.flickr.com/services/rest/?" + urllib.parse.urlencode(params)
-        data = await get_json_with_retries(session, url)
-        if not data or data.get("stat") != "ok":
-            break
-        photos_block = data.get("photos", {})
-        photos = photos_block.get("photo", [])
-        if not photos:
-            break
-        all_photos.extend(photos)
-        if page >= int(photos_block.get("pages", 1)):
-            break
+    url = (
+        "https://www.flickr.com/services/feeds/photos_public.gne"
+        f"?id={urllib.parse.quote(nsid)}&format=json&lang=en-us"
+    )
+    raw_text = await get_text_with_retries(session, url)
+    if not raw_text:
+        return
+    feed = _parse_flickr_feed(raw_text)
+    if not feed:
+        return
+
+    items = feed.get("items", [])
+    # Feed order is newest-first; post oldest-of-the-batch first so a
+    # channel reads chronologically, same as the NASA channels.
+    items = list(reversed(items))
 
     sem = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
 
-    async def handle_photo(photo: dict):
-        flickr_id = f"flickr_{photo['id']}"
+    async def handle_item(item: dict):
+        link = item.get("link", "")
+        photo_id_match = re.search(r"/(\d+)/?$", link.rstrip("/"))
+        if not photo_id_match:
+            return
+        flickr_id = f"flickr_{photo_id_match.group(1)}"
         if flickr_id in downloaded_ids:
             return
 
-        title = photo.get("title") or "Untitled"
-        description = ""
-        desc_field = photo.get("description")
-        if isinstance(desc_field, dict):
-            description = desc_field.get("_content", "")
-        tags = (photo.get("tags") or "").split()
+        title = item.get("title") or "Untitled"
+        # The feed's "description" field is an HTML snippet (thumbnail +
+        # caption), not plain text - strip tags before running it through
+        # the same keyword filter used for NASA metadata.
+        description_html = item.get("description") or ""
+        description = re.sub(r"<[^>]+>", " ", description_html)
+        tags = (item.get("tags") or "").split()
 
         skip_reason = metadata_looks_human_or_fake(
             {"title": title, "description": description, "keywords": tags}
@@ -834,11 +812,15 @@ async def fetch_flickr(session: aiohttp.ClientSession, guild: discord.Guild, tar
             await save_log()
             return
 
-        image_url = photo.get("url_o") or photo.get("url_l") or photo.get("url_c")
+        media = item.get("media", {})
+        image_url = media.get("m", "")
         if not image_url:
             return
+        # The feed's media.m URL points at a small "_m" thumbnail - swap in
+        # the "_b" (large, ~1024px) size, which Flickr serves at the same
+        # path with a different suffix, so embeds aren't postage-stamp sized.
+        image_url = re.sub(r"_m(\.[a-zA-Z]+)$", r"_b\1", image_url)
         image_url = clean_url(image_url)
-        page_url = f"https://www.flickr.com/photos/{username}/{photo['id']}"
 
         log.debug("Checking %s (%s) -> %s", flickr_id, title[:40], image_url)
         async with sem:
@@ -853,11 +835,12 @@ async def fetch_flickr(session: aiohttp.ClientSession, guild: discord.Guild, tar
                 )
                 return
 
-        embed = discord.Embed(title=title[:256], url=page_url, color=discord.Color.gold())
-        embed.add_field(name="Date Taken", value=str(photo.get("datetaken", "N/A"))[:10], inline=True)
-        embed.add_field(name="Source", value=f"[View on Flickr]({page_url})", inline=False)
+        embed = discord.Embed(title=title[:256], url=link, color=discord.Color.gold())
+        date_taken = item.get("date_taken", "N/A")
+        embed.add_field(name="Date Taken", value=str(date_taken)[:10], inline=True)
+        embed.add_field(name="Source", value=f"[View on Flickr]({link})", inline=False)
         embed.set_image(url=image_url)
-        embed.set_footer(text=f"Flickr ID: {photo['id']}")
+        embed.set_footer(text=f"Flickr ID: {photo_id_match.group(1)}")
 
         try:
             await channel.send(embed=embed)
@@ -867,8 +850,8 @@ async def fetch_flickr(session: aiohttp.ClientSession, guild: discord.Guild, tar
         except discord.HTTPException as e:
             log.warning("Failed to post image (%s): %s", flickr_id, e)
 
-    for photo in all_photos:
-        await handle_photo(photo)
+    for item in items:
+        await handle_item(item)
 
 
 # --------------------------------------------------------------------------
@@ -1044,13 +1027,8 @@ async def on_command_error(ctx: commands.Context, error):
 @commands.has_permissions(manage_channels=True)
 @commands.cooldown(1, 300, commands.BucketType.guild)
 async def setup_space(ctx: commands.Context):
-    sources = "NASA Media and Mars archives"
-    if FLICKR_API_KEY:
-        sources += ", ESA Flickr, and SpaceX Flickr"
-    else:
-        sources += " (ESA/SpaceX skipped - no flickr_api_key configured)"
     await ctx.send(
-        f"Starting search across {sources} "
+        "Starting search across NASA Media/Mars archives, ESA Flickr, and SpaceX Flickr "
         f"(filtering out humans and non-photo renders{' + visual face check' if CV2_AVAILABLE else ''})..."
     )
     await process_all_targets(ctx.guild)
