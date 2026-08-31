@@ -1,5 +1,5 @@
 name: "Space Image Discord Bot"
-version: "1.0.1"
+version: "1.0.2"
 slug: "space_bot"
 description: "Posts real NASA/Mars space photography into Discord channels 24/7"
 arch:
