@@ -116,13 +116,24 @@ TARGETS = {
         "type": "nasa_api", "query": "galaxy", "name": "🌌-galaxies",
         "description": "Real telescope photography of galaxies.",
     },
+    # NOTE: These used to hit api.nasa.gov/mars-photos (type: "mars_api"),
+    # which proxies a community-run project (mars-photos.herokuapp.com)
+    # that's been unmaintained since Heroku killed free dynos in 2022. That
+    # endpoint is now returning 404s outright, so these are pointed at the
+    # NASA Image & Video Library search instead (same working mechanism as
+    # every other channel above). The old "mars_api" code path (get_mars_photos
+    # / fetch_mars_api) is left in place below in case NASA ever restores
+    # a working rover-photos endpoint - switch "type" back to "mars_api"
+    # if so.
     "mars-curiosity": {
-        "type": "mars_api", "rover": "curiosity", "name": "🔴-mars-curiosity",
-        "description": "Raw surface photos from NASA's Curiosity rover (Gale Crater, Mars).",
+        "type": "nasa_api", "query": "Curiosity rover Mars surface Gale Crater",
+        "name": "🔴-mars-curiosity",
+        "description": "Real surface photography from NASA's Curiosity rover (Gale Crater, Mars).",
     },
     "mars-perseverance": {
-        "type": "mars_api", "rover": "perseverance", "name": "🔴-mars-perseverance",
-        "description": "Raw surface photos from NASA's Perseverance rover (Jezero Crater, Mars).",
+        "type": "nasa_api", "query": "Perseverance rover Mars surface Jezero Crater",
+        "name": "🔴-mars-perseverance",
+        "description": "Real surface photography from NASA's Perseverance rover (Jezero Crater, Mars).",
     },
 }
 
