@@ -1,0 +1,19 @@
+name: "Space Image Discord Bot"
+version: "1.0.0"
+slug: "space_bot"
+description: "Posts real NASA/Mars space photography into Discord channels 24/7"
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+startup: services
+boot: auto
+init: false
+options:
+  discord_bot_token: ""
+  nasa_api_key: "DEMO_KEY"
+schema:
+  discord_bot_token: str
+  nasa_api_key: str
