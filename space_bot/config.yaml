@@ -1,5 +1,5 @@
 name: "Space Image Discord Bot"
-version: "1.0.4"
+version: "1.0.5"
 slug: "space_bot"
 description: "Posts real NASA/Mars space photography into Discord channels 24/7"
 arch:
@@ -14,6 +14,8 @@ init: false
 options:
   discord_bot_token: ""
   nasa_api_key: "DEMO_KEY"
+  log_level: "INFO"
 schema:
   discord_bot_token: str
   nasa_api_key: str
+  log_level: list(DEBUG|INFO|WARNING|ERROR)?

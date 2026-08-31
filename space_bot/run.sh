@@ -3,6 +3,7 @@ set -e
 
 export DISCORD_BOT_TOKEN=$(bashio::config 'discord_bot_token')
 export NASA_API_KEY=$(bashio::config 'nasa_api_key')
+export LOG_LEVEL=$(bashio::config 'log_level' 'INFO')
 
 if [ -z "${DISCORD_BOT_TOKEN}" ]; then
     bashio::log.fatal "discord_bot_token is not set in the add-on configuration."

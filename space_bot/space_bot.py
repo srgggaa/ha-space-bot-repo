@@ -64,8 +64,9 @@ MAX_IMAGE_BYTES = 25 * 1024 * 1024  # skip absurdly large files
 HTTP_MAX_RETRIES = 3
 HTTP_BACKOFF_SECONDS = 2
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger("space_bot")
@@ -281,13 +282,28 @@ if CV2_AVAILABLE:
 
 
 def _detect_human_sync(image_bytes: bytes) -> bool:
-    """CPU-bound face/body detection. Run via asyncio.to_thread."""
+    """CPU-bound face/body detection. Run via asyncio.to_thread.
+
+    Decodes directly at reduced resolution (IMREAD_REDUCED_COLOR_4) instead
+    of decoding at full native resolution and resizing afterwards. Some NASA
+    imagery (Hubble/JWST mosaics, stitched panoramas, etc.) is tens of
+    megapixels even when the compressed file is well under MAX_IMAGE_BYTES;
+    a full-resolution decode of one such image can spike memory by hundreds
+    of MB to 1GB+, which is enough to get the whole add-on OOM-killed on a
+    memory-constrained host. Detection accuracy doesn't need full res
+    anyway (the old code immediately downscaled to max_dim=1000 after
+    decoding), so decode small from the start.
+    """
     arr = np.frombuffer(image_bytes, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    img = cv2.imdecode(arr, cv2.IMREAD_REDUCED_COLOR_4)
+    if img is None:
+        # Reduced-resolution decode isn't supported for every codec/file;
+        # fall back to a normal decode for those cases.
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         return False
 
-    # Downscale large images for speed; detection accuracy doesn't need
+    # Downscale further if still large; detection accuracy doesn't need
     # full resolution.
     h, w = img.shape[:2]
     max_dim = 1000
@@ -317,15 +333,37 @@ async def image_contains_human(session: aiohttp.ClientSession, image_url: str) -
     if not CV2_AVAILABLE:
         return False
     try:
+        log.debug("Downloading for human-check: %s", image_url)
         async with session.get(image_url) as resp:
             if resp.status != 200:
                 return False
             content_length = resp.content_length
             if content_length and content_length > MAX_IMAGE_BYTES:
+                log.info(
+                    "Skipping human-check download for %s: declared size %s bytes exceeds cap",
+                    image_url, content_length,
+                )
                 return False
-            data = await resp.read()
-            if len(data) > MAX_IMAGE_BYTES:
-                return False
+
+            # Stream the body and enforce MAX_IMAGE_BYTES as data actually
+            # arrives, instead of calling resp.read() and checking the size
+            # afterwards. Without a Content-Length header (chunked
+            # responses, which some CDNs use), resp.read() would buffer an
+            # unbounded amount of data into memory before the size check
+            # ever ran - which is exactly the kind of thing that gets a
+            # memory-constrained container OOM-killed.
+            chunks = []
+            total = 0
+            async for chunk in resp.content.iter_chunked(65536):
+                total += len(chunk)
+                if total > MAX_IMAGE_BYTES:
+                    log.info(
+                        "Aborting human-check download for %s: exceeded %s bytes cap mid-stream",
+                        image_url, MAX_IMAGE_BYTES,
+                    )
+                    return False
+                chunks.append(chunk)
+            data = b"".join(chunks)
         return await asyncio.to_thread(_detect_human_sync, data)
     except Exception as e:
         log.warning("Human-detection check failed for %s: %s", image_url, e)
@@ -547,6 +585,7 @@ async def fetch_nasa_api(session: aiohttp.ClientSession, guild: discord.Guild, t
 
         image_url = clean_url(img_urls[0])
 
+        log.debug("Checking %s (%s) -> %s", nasa_id, disp_title[:40], image_url)
         async with sem:
             if await image_contains_human(session, image_url):
                 log.info("Skipping %s (%s): human detected in image", nasa_id, disp_title[:40])
@@ -644,6 +683,7 @@ async def fetch_mars_api(session: aiohttp.ClientSession, guild: discord.Guild, t
         if not img_url:
             return
 
+        log.debug("Checking %s -> %s", photo_id, img_url)
         async with sem:
             if await image_contains_human(session, img_url):
                 log.info("Skipping mars photo %s: human detected in image", photo_id)
